@@ -1,0 +1,16 @@
+# FastAPI Backend Requirements
+fastapi
+uvicorn
+python-multipart
+pydantic
+
+# ML Libraries
+pandas
+numpy
+scikit-learn
+catboost
+joblib
+
+# HuggingFace Hub & env config
+huggingface_hub
+python-dotenv
