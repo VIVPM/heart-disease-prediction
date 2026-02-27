@@ -6,32 +6,28 @@ falls back to local GPU/CPU for development.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Streamlit UI (:8501)                    │
-│         Single Prediction │ Batch Prediction │ Train Model  │
-└────────────────┬──────────────────────────────┬────────────┘
-                 │  REST (requests)              │ POST /train
-                 ▼                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  FastAPI Backend (:8000)                    │
-│  /predict  /predict/batch  /train  /train/status           │
-│  /model/info  /model/versions  /health                     │
-└──────┬────────────────────────────────────┬────────────────┘
-       │ load model                         │ trigger training
-       ▼                                    ▼
-┌──────────────┐            ┌───────────────────────────────┐
-│  HF Hub      │            │     Training Pipeline          │
-│  model       │◄───upload──│  1. preprocess_data()          │
-│  versions    │            │  2. Modal T4 GPU               │
-│  VPM100/     │            │     └─ fallback: local GPU     │
-│  heart-...   │            │        └─ fallback: CPU        │
-└──────────────┘            │  3. upload to HF Hub           │
-       │ download on        └───────────────────────────────┘
-       │ startup/version
-       ▼
-  models/catboost_best_model.cbm
-  models/scaler.joblib
+```mermaid
+flowchart TD
+    User(["👤 User"])
+
+    User -->|browser| UI["🖥️ Streamlit UI\n(:8501)\nTrain · Single Predict · Batch Predict"]
+    UI -->|REST requests| API["⚙️ FastAPI Backend\n(:8000)\n/predict · /train · /model/info"]
+
+    API -->|POST /train| TP["🔄 Training Pipeline\npreprocess_data()"]
+
+    TP --> M1{"Modal\ncredentials\nset?"}
+    M1 -->|yes| MG["☁️ Modal Cloud\nT4 GPU\ntrain_on_gpu()"]
+    M1 -->|no| LG{"Local\nGPU?"}
+    MG -->|GPU unavailable| LG
+    LG -->|yes| GPU["💻 Local GPU\nCatBoost GPU"]
+    LG -->|no| CPU["🖳 Local CPU\nCatBoost CPU"]
+
+    MG -->|uploads artifacts| HF[("🤗 Hugging Face Hub\nversioned tags\nv1.0, v2.0, ...")]
+    GPU -->|api.py uploads| HF
+    CPU -->|api.py uploads| HF
+
+    HF -->|download on startup\nor version switch| API
+    API -->|predict| User
 ```
 
 ## Project Structure
