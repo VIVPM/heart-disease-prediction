@@ -7,28 +7,63 @@ falls back to local GPU/CPU for development.
 ## Architecture
 
 ```mermaid
-flowchart TD
-    User(["👤 User"])
+graph LR
+    %% Data Pipeline
+    subgraph Data_Pipeline [1. Data Pipeline]
+        Raw[Raw CSV Data] -->|data_loader.py| Loaded[Loaded DataFrame]
+        Loaded -->|preprocessing.py| Feats["Engineered Features<br>(Outlier Caps, Bins, Interactions)"]
+        Feats -->|StandardScaler| Scaled[Scaled Train / Test]
+    end
 
-    User -->|browser| UI["🖥️ Streamlit UI\n(:8501)\nTrain · Single Predict · Batch Predict"]
-    UI -->|REST requests| API["⚙️ FastAPI Backend\n(:8000)\n/predict · /train · /model/info"]
+    %% Training Pipeline
+    subgraph Training_Pipeline [2. Model Training]
+        Scaled -->|Optuna 50 trials| Tuned["Best CatBoost Params<br>(Trial 41, AUC: 0.9562)"]
+        Tuned -->|Modal T4 GPU| GPU["☁️ Modal GPU<br>train_on_gpu()"]
+        Tuned -->|fallback| LGPU["💻 Local GPU"]
+        LGPU -->|fallback| CPU["🖳 Local CPU"]
+        GPU & LGPU & CPU --> Artifacts["Model Artifacts<br>(.cbm + scaler.joblib)"]
+    end
 
-    API -->|POST /train| TP["🔄 Training Pipeline\npreprocess_data()"]
+    %% Serving
+    subgraph Deployment [3. Inference & Serving]
+        Artifacts -->|versioned upload| HF["🤗 HF Hub<br>(v1.0, v2.0, ...)"]
+        HF -->|download on startup| API["⚙️ FastAPI Backend<br>(:8000)"]
+        API -->|predict| UI["🖥️ Streamlit UI<br>(:8501)"]
+        User[👤 User] -->|interact| UI
+    end
 
-    TP --> M1{"Modal\ncredentials\nset?"}
-    M1 -->|yes| MG["☁️ Modal Cloud\nT4 GPU\ntrain_on_gpu()"]
-    M1 -->|no| LG{"Local\nGPU?"}
-    MG -->|GPU unavailable| LG
-    LG -->|yes| GPU["💻 Local GPU\nCatBoost GPU"]
-    LG -->|no| CPU["🖳 Local CPU\nCatBoost CPU"]
-
-    MG -->|uploads artifacts| HF[("🤗 Hugging Face Hub\nversioned tags\nv1.0, v2.0, ...")]
-    GPU -->|api.py uploads| HF
-    CPU -->|api.py uploads| HF
-
-    HF -->|download on startup\nor version switch| API
-    API -->|predict| User
+    style Data_Pipeline fill:#e1f5fe,stroke:#01579b
+    style Training_Pipeline fill:#fff3e0,stroke:#e65100
+    style Deployment fill:#e8f5e9,stroke:#1b5e20
 ```
+
+## Results
+
+### Model Comparison (Test Set — 630K patient records)
+
+| Model | Accuracy | Precision | Recall | F1 | ROC-AUC |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **CatBoost (Optuna)** 🏆 | **88.24%** | 83.67% | **91.67%** | **87.49%** | **0.9562** |
+| XGBoost | 88.97% | **88.39%** | 86.79% | 87.58% | 0.9560 |
+| LightGBM | 88.95% | 88.38% | 86.76% | 87.56% | 0.9559 |
+| Logistic Regression | 88.65% | 88.29% | 86.09% | 87.18% | 0.9536 |
+| Random Forest | 88.14% | 87.39% | 85.96% | 86.67% | 0.9477 |
+| Decision Tree | 82.65% | 80.59% | 80.74% | 80.66% | 0.8247 |
+
+### Best Model: CatBoost with Optuna Tuning
+
+**Classification Report (Test Set — 126,000 samples):**
+
+| Class | Precision | Recall | F1-Score | Support |
+|---|:---:|:---:|:---:|:---:|
+| No Disease (0) | 0.89 | 0.91 | 0.90 | 69,509 |
+| Disease (1) | 0.88 | 0.87 | 0.88 | 56,491 |
+| **Accuracy** | | | **0.89** | **126,000** |
+
+- **Optuna**: 50 trials, best found at Trial 1 — ROC-AUC: **0.9562**
+- **Training hardware**: NVIDIA GPU (T4 on Modal, local GPU during development)
+- **Training set size**: 504,000 samples | **Test set**: 126,000 samples
+
 
 ## Project Structure
 
