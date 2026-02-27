@@ -93,13 +93,16 @@ def _hf_enabled() -> bool:
 
 
 def _get_hf_versions():
-    """Fetch all available version tags from the HF repo."""
+    """Fetch all available version tags from the HF repo, sorted ascending."""
     if not _hf_enabled():
         return []
     try:
         api = HfApi(token=HF_TOKEN)
         refs = api.list_repo_refs(repo_id=HF_REPO_ID)
-        return [tag.name for tag in refs.tags if tag.name.startswith("v")]
+        tags = [tag.name for tag in refs.tags if tag.name.startswith("v")]
+        # Sort numerically: v1.0 < v2.0 < ... < v10.0
+        tags.sort(key=lambda v: tuple(int(x) for x in v.lstrip("v").split(".")))
+        return tags
     except Exception as e:
         print(f"⚠️ Could not fetch versions: {e}")
         return []
@@ -234,8 +237,12 @@ def _load_model_artifacts(version: str = "main", download: bool = True):
         scaler = None
         print("⚠️  No scaler found. Predictions will use unscaled features.")
 
-    # Get feature names from CatBoost model
-    feature_names = list(model.feature_names_)
+    # Use scaler's feature names (string names from preprocessed DataFrame).
+    # model.feature_names_ are integer indices (model was trained on numpy arrays).
+    if scaler is not None and hasattr(scaler, "feature_names_in_"):
+        feature_names = list(scaler.feature_names_in_)
+    else:
+        feature_names = list(model.feature_names_) if model.feature_names_ is not None else []
 
     current_version = version
     print(f"✅ Model loaded: CatBoost @ {version} ({len(feature_names)} features)")
@@ -310,6 +317,8 @@ class ModelInfo(BaseModel):
     num_features: int
     feature_names: list[str]
     version: Optional[str] = None
+    best_score: Optional[float] = None
+    device: Optional[str] = None
 
 
 class TrainingStatusResponse(BaseModel):
@@ -381,11 +390,12 @@ def _predict_single(df: pd.DataFrame) -> PredictionResult:
         )
 
     if scaler is not None:
-        scaled = scaler.transform(df)
+        scaled_arr = scaler.transform(df)   # df has scaler's string column names ✓
     else:
-        scaled = df.values
+        scaled_arr = df.to_numpy()
 
-    prob = float(model.predict_proba(scaled)[0][1])
+    # Pass numpy array to model — it was trained on numpy so no feature name conflict
+    prob = float(model.predict_proba(scaled_arr)[0][1])
     pred = int(prob >= PREDICTION_THRESHOLD)
     prediction = "Presence" if pred == 1 else "Absence"
 
@@ -405,39 +415,110 @@ def _predict_single(df: pd.DataFrame) -> PredictionResult:
 def _run_training_pipeline(data_path: Path):
     """
     Run the full training pipeline in a background thread.
-    Saves model and scaler to MODELS_DIR, then uploads to HF Hub.
+    1. Preprocesses data locally (fast, CPU-only)
+    2. Dispatches CatBoost training to Modal GPU (if configured)
+       → falls back to local train_models() if Modal unavailable
+    3. Downloads fresh artifacts from HF Hub into memory
     """
     global training_status, model, scaler, feature_names
 
     with training_lock:
-        training_status["status"] = "running"
-        training_status["started_at"] = datetime.now().isoformat()
+        training_status["status"]       = "running"
+        training_status["started_at"]   = datetime.now().isoformat()
         training_status["completed_at"] = None
-        training_status["error"] = None
-        training_status["message"] = "Training started..."
+        training_status["error"]        = None
+        training_status["message"]      = "Training started..."
 
     try:
         from backend.training.preprocessing import preprocess_data
-        from backend.training.train import train_models
 
-        # Step 1: Preprocess
+        # ── Step 1: Preprocess ────────────────────────────────────────────
         with training_lock:
-            training_status["message"] = "Step 1/2: Preprocessing data..."
+            training_status["message"] = "Step 1/3: Preprocessing data..."
         print("🔄 Running preprocessing...")
         X_train, X_test, y_train, y_test = preprocess_data()
 
-        # Step 2: Train
-        with training_lock:
-            training_status["message"] = "Step 2/2: Training CatBoost with best parameters..."
-        print("🔄 Training model...")
-        best_model, best_scaler, best_score, device_type = train_models()
+        # ── Step 2: Train (Modal GPU → local CPU fallback) ────────────────
+        MODAL_TOKEN_ID     = os.environ.get("MODAL_TOKEN_ID", "")
+        MODAL_TOKEN_SECRET = os.environ.get("MODAL_TOKEN_SECRET", "")
+        modal_available    = bool(MODAL_TOKEN_ID and MODAL_TOKEN_SECRET)
 
-        # Upload to HuggingFace Hub
-        with training_lock:
-            training_status["message"] = "Uploading model to HuggingFace Hub..."
-        hf_uploaded = _upload_to_hf(best_score=best_score)
+        best_score   = None
+        device_type  = "CPU"
+        num_features = X_train.shape[1]
 
-        # Reload models into memory (skip download since we just built them)
+        if modal_available:
+            try:
+                import subprocess
+                import tempfile
+                import json as _json
+
+                with training_lock:
+                    training_status["message"] = "Step 2/3: Training on Modal GPU (T4)..."
+                print("🚀 Dispatching training to Modal GPU via subprocess...")
+
+                # Save preprocessed splits to temp CSV files
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    def _save(arr_or_df, name):
+                        import pandas as _pd
+                        path = os.path.join(tmpdir, name)
+                        if hasattr(arr_or_df, "to_csv"):
+                            arr_or_df.to_csv(path, index=False)
+                        else:
+                            _pd.DataFrame(arr_or_df).to_csv(path, index=False)
+                        return path
+
+                    x_train_path = _save(X_train, "x_train.csv")
+                    x_test_path  = _save(X_test,  "x_test.csv")
+                    y_train_path = _save(y_train,  "y_train.csv")
+                    y_test_path  = _save(y_test,   "y_test.csv")
+
+                    runner_path = str(BACKEND_DIR / "training" / "run_modal.py")
+                    env = os.environ.copy()
+                    env["MODAL_TOKEN_ID"]     = MODAL_TOKEN_ID
+                    env["MODAL_TOKEN_SECRET"] = MODAL_TOKEN_SECRET
+                    env["PYTHONUTF8"]         = "1"
+
+                    proc = subprocess.run(
+                        [sys.executable, runner_path,
+                         "--x_train", x_train_path,
+                         "--x_test",  x_test_path,
+                         "--y_train", y_train_path,
+                         "--y_test",  y_test_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=900,
+                        env=env,
+                    )
+
+                if proc.returncode != 0:
+                    raise RuntimeError(proc.stderr.strip() or "Modal subprocess failed")
+
+                result       = _json.loads(proc.stdout.strip())
+                best_score   = result["best_score"]
+                device_type  = result["device"]
+                num_features = result["num_features"]
+                print(f"✅ Modal GPU training complete. ROC-AUC: {best_score:.4f}, Device: {device_type}")
+
+            except Exception as modal_err:
+                print(f"⚠️ Modal GPU failed ({modal_err}), falling back to local...")
+                modal_available = False   # trigger fallback below
+
+        if not modal_available:
+            from backend.training.train import train_models
+            with training_lock:
+                training_status["message"] = "Step 2/3: Training CatBoost on local CPU..."
+            print("🔄 Training model locally (CPU)...")
+            best_model_obj, best_scaler_obj, best_score, device_type = train_models()
+            num_features = X_train.shape[1]
+
+        # ── Step 3: Upload to HF Hub (skip if Modal already did it) ──────
+        if not modal_available:
+            with training_lock:
+                training_status["message"] = "Step 3/3: Uploading model to HuggingFace Hub..."
+            _upload_to_hf(best_score=best_score)
+
+        # Reload model into memory from local files
         _load_model_artifacts(download=False)
 
         with training_lock:
@@ -445,12 +526,12 @@ def _run_training_pipeline(data_path: Path):
             training_status["completed_at"] = datetime.now().isoformat()
             training_status["model_name"]   = "CatBoost"
             training_status["best_score"]   = round(best_score, 4)
-            training_status["num_features"] = len(feature_names)
+            training_status["num_features"] = len(feature_names) or num_features
             training_status["device"]       = device_type
-            hf_note = f" | Uploaded to HF Hub ({HF_REPO_ID})" if hf_uploaded else ""
             training_status["message"] = (
-                f"Training complete! Model: CatBoost "
-                f"(ROC-AUC: {best_score:.4f}, Device: {device_type}){hf_note}"
+                f"Training complete! CatBoost "
+                f"(ROC-AUC: {best_score:.4f}, Device: {device_type}, "
+                f"HF Hub: {HF_REPO_ID})"
             )
 
         print(f"✅ Training complete. ROC-AUC: {best_score:.4f}, Device: {device_type}")
@@ -476,6 +557,7 @@ async def root():
         "model": "CatBoost",
         "version": current_version,
         "model_loaded": model is not None,
+        "hf_repo_id": HF_REPO_ID,
         "docs": "/docs",
         "endpoints": {
             "predict": "/predict",
@@ -608,11 +690,28 @@ async def get_model_info(version: str = "main"):
             detail="Model not loaded yet."
         )
 
+    # Read best_score and device from model_info.csv if it exists
+    best_score = None
+    device = None
+    info_path = MODELS_DIR / "model_info.csv"
+    if info_path.exists():
+        try:
+            info_df = pd.read_csv(info_path)
+            if not info_df.empty:
+                if "best_score" in info_df.columns:
+                    best_score = float(info_df.iloc[0]["best_score"])
+                if "device" in info_df.columns:
+                    device = str(info_df.iloc[0]["device"])
+        except Exception:
+            pass
+
     return ModelInfo(
         model_name="CatBoost",
         num_features=len(feature_names),
         feature_names=feature_names,
         version=current_version,
+        best_score=best_score,
+        device=device,
     )
 
 

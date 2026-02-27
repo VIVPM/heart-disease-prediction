@@ -256,53 +256,41 @@ with tab_train:
                 st.error(f"❌ Failed to start training: {resp.text}")
 
         # ── Training Status Panel ──────────────────────────────────────────
-        if st.session_state.get("training_triggered", False):
-            st.markdown("---")
-            st.markdown("#### 📊 Training Status")
+        st.markdown("---")
+        st.markdown("#### 📊 Training Status")
 
-            status_placeholder = st.empty()
-            steps_placeholder = st.empty()
-            metrics_placeholder = st.empty()
-            refresh_placeholder = st.empty()
+        status_placeholder = st.empty()
+        steps_placeholder = st.empty()
+        metrics_placeholder = st.empty()
+        refresh_placeholder = st.empty()
 
-            def render_status():
-                try:
-                    r = requests.get(f"{API_URL}/train/status", timeout=10)
-                    if r.status_code == 200:
-                        s = r.json()
-                        status = s.get("status", "idle")
-                    else:
-                        status = "idle"
-                        s = {}
-                except Exception:
+        def render_status():
+            try:
+                r = requests.get(f"{API_URL}/train/status", timeout=10)
+                if r.status_code == 200:
+                    s = r.json()
+                    status = s.get("status", "idle")
+                else:
                     status = "idle"
                     s = {}
+            except Exception:
+                status = "idle"
+                s = {}
 
-                if status == "idle":
-                    status_placeholder.info("💤 No training in progress. Upload data and click **Start Training**.")
+            if status == "idle":
+                # If a model exists, show it exactly like completed training
+                latest_version = st.session_state.get("selected_version")
+                model_info = get_model_info(version=latest_version) if latest_version and latest_version != "main" else None
 
-                elif status == "running":
-                    message = s.get("message", "")
-                    status_placeholder.markdown(
-                        f'<div class="status-running">🔄 <strong>Training in Progress</strong><br>{message}</div>',
-                        unsafe_allow_html=True
+                if model_info:
+                    score  = model_info.get("best_score")
+                    device = model_info.get("device") or "-"
+                    repo   = root_data.get("hf_repo_id") or model_info.get("hf_repo_id") or "HF Hub"
+                    score_str = f"{score:.4f}" if score else "-"
+                    message = (
+                        f"Training complete! {model_info.get('model_name', 'CatBoost')} "
+                        f"(ROC-AUC: {score_str}, Device: {device}, HF Hub: {repo})"
                     )
-                    # Step indicators
-                    msg_lower = message.lower()
-                    step1 = "✅" if "step 2" in msg_lower or "complete" in msg_lower else (
-                        "🔄" if "step 1" in msg_lower else "⏳")
-                    step2 = "✅" if "complete" in msg_lower else (
-                        "🔄" if "step 2" in msg_lower else "⏳")
-
-                    steps_placeholder.markdown(f"""
-                    | Step | Task | Status |
-                    |------|------|--------|
-                    | 1 | Data Preprocessing | {step1} |
-                    | 2 | Model Training (CatBoost) | {step2} |
-                    """)
-
-                elif status == "completed":
-                    message = s.get("message", "")
                     status_placeholder.markdown(
                         f'<div class="status-completed">✅ <strong>Training Complete!</strong><br>{message}</div>',
                         unsafe_allow_html=True
@@ -312,39 +300,82 @@ with tab_train:
                     |------|------|--------|
                     | 1 | Data Preprocessing | ✅ |
                     | 2 | Model Training (CatBoost) | ✅ |
+                    | 3 | Upload to HF Hub | ✅ |
                     """)
                     m1, m2, m3, m4 = metrics_placeholder.columns(4)
-                    m1.metric("🏆 Model", s.get("model_name", "CatBoost"))
-                    score = s.get("best_score")
-                    m2.metric("📈 ROC-AUC Score", f"{score:.4f}" if score and pd.notna(score) else "-")
-                    m3.metric("🔢 Features", s.get("num_features", "-"))
-                    device = s.get("device", "-")
+                    m1.metric("🏆 Model", model_info.get("model_name", "CatBoost"))
+                    m2.metric("📈 ROC-AUC Score", score_str)
+                    m3.metric("🔢 Features", model_info.get("num_features", "-"))
                     device_icon = "🖥️" if device == "GPU" else "💻"
-                    m4.metric(f"{device_icon} Device", device if device else "-")
+                    m4.metric(f"{device_icon} Device", device)
+                else:
+                    status_placeholder.info("📂 No models trained yet. Upload `train.csv` and click **Start Training**.")
 
-                elif status == "failed":
-                    message = s.get("message", "")
-                    status_placeholder.markdown(
-                        f'<div class="status-failed">❌ <strong>Training Failed</strong><br>{message}</div>',
-                        unsafe_allow_html=True
-                    )
-                    if s.get("error"):
-                        with st.expander("🔍 Error Details"):
-                            st.code(s["error"], language="python")
+            elif status == "running":
+                message = s.get("message", "")
+                status_placeholder.markdown(
+                    f'<div class="status-running">🔄 <strong>Training in Progress</strong><br>{message}</div>',
+                    unsafe_allow_html=True
+                )
+                msg_lower = message.lower()
+                step1 = "✅" if "step 2" in msg_lower or "step 3" in msg_lower or "complete" in msg_lower else (
+                    "🔄" if "step 1" in msg_lower else "⏳")
+                step2 = "✅" if "step 3" in msg_lower or "complete" in msg_lower else (
+                    "🔄" if "step 2" in msg_lower else "⏳")
+                step3 = "✅" if "complete" in msg_lower else (
+                    "🔄" if "step 3" in msg_lower else "⏳")
 
-                return status
+                steps_placeholder.markdown(f"""
+                | Step | Task | Status |
+                |------|------|--------|
+                | 1 | Data Preprocessing | {step1} |
+                | 2 | Model Training (CatBoost) | {step2} |
+                | 3 | Upload to HF Hub | {step3} |
+                """)
 
-            current_status = render_status()
+            elif status == "completed":
+                message = s.get("message", "")
+                status_placeholder.markdown(
+                    f'<div class="status-completed">✅ <strong>Training Complete!</strong><br>{message}</div>',
+                    unsafe_allow_html=True
+                )
+                steps_placeholder.markdown("""
+                | Step | Task | Status |
+                |------|------|--------|
+                | 1 | Data Preprocessing | ✅ |
+                | 2 | Model Training (CatBoost) | ✅ |
+                | 3 | Upload to HF Hub | ✅ |
+                """)
+                m1, m2, m3, m4 = metrics_placeholder.columns(4)
+                m1.metric("🏆 Model", s.get("model_name", "CatBoost"))
+                score = s.get("best_score")
+                m2.metric("📈 ROC-AUC Score", f"{score:.4f}" if score and pd.notna(score) else "-")
+                m3.metric("🔢 Features", s.get("num_features", "-"))
+                device = s.get("device", "-")
+                device_icon = "🖥️" if device == "GPU" else "💻"
+                m4.metric(f"{device_icon} Device", device if device else "-")
 
-            if current_status == "running":
-                refresh_placeholder.markdown("*⏳ Training running in background — click Refresh to check progress.*")
-                if st.button("🔄 Refresh Status"):
-                    st.rerun()
-            else:
-                refresh_placeholder.empty()
-                if current_status in ("completed", "failed"):
-                    if st.button("🔄 Refresh Status"):
-                        st.rerun()
+            elif status == "failed":
+                message = s.get("message", "")
+                status_placeholder.markdown(
+                    f'<div class="status-failed">❌ <strong>Training Failed</strong><br>{message}</div>',
+                    unsafe_allow_html=True
+                )
+                if s.get("error"):
+                    with st.expander("🔍 Error Details"):
+                        st.code(s["error"], language="python")
+
+            return status
+
+        current_status = render_status()
+
+        if current_status == "running":
+            refresh_placeholder.markdown("*⏳ Training running in background — click Refresh to check progress.*")
+            if st.button("🔄 Refresh Status"):
+                st.rerun()
+        elif current_status in ("completed", "failed"):
+            if st.button("🔄 Refresh Status"):
+                st.rerun()
 
 
 # ======================== TAB 1: Single Prediction ==========================

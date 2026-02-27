@@ -1,6 +1,38 @@
 # Heart Disease Prediction
 
-Machine Learning project for predicting heart disease presence using patient medical data. Built with CatBoost classifier.
+CatBoost classifier for predicting heart disease presence from patient medical data.
+FastAPI backend + Streamlit UI. Training runs on Modal GPU (T4) when deployed,
+falls back to local GPU/CPU for development.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Streamlit UI (:8501)                    │
+│         Single Prediction │ Batch Prediction │ Train Model  │
+└────────────────┬──────────────────────────────┬────────────┘
+                 │  REST (requests)              │ POST /train
+                 ▼                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  FastAPI Backend (:8000)                    │
+│  /predict  /predict/batch  /train  /train/status           │
+│  /model/info  /model/versions  /health                     │
+└──────┬────────────────────────────────────┬────────────────┘
+       │ load model                         │ trigger training
+       ▼                                    ▼
+┌──────────────┐            ┌───────────────────────────────┐
+│  HF Hub      │            │     Training Pipeline          │
+│  model       │◄───upload──│  1. preprocess_data()          │
+│  versions    │            │  2. Modal T4 GPU               │
+│  VPM100/     │            │     └─ fallback: local GPU     │
+│  heart-...   │            │        └─ fallback: CPU        │
+└──────────────┘            │  3. upload to HF Hub           │
+       │ download on        └───────────────────────────────┘
+       │ startup/version
+       ▼
+  models/catboost_best_model.cbm
+  models/scaler.joblib
+```
 
 ## Project Structure
 
@@ -8,280 +40,200 @@ Machine Learning project for predicting heart disease presence using patient med
 heart-disease-prediction/
 ├── backend/
 │   ├── training/
-│   │   ├── __init__.py
-│   │   ├── predict.py          # Prediction functions
-│   │   └── utils.py            # Utility functions
-│   ├── models/                 # Backend models (for API)
-│   └── data/                   # Backend data (for API)
+│   │   ├── data_loader.py       # loads raw CSV
+│   │   ├── preprocessing.py     # cleaning, feature engineering, split
+│   │   ├── train.py             # local CatBoost training (CPU/GPU)
+│   │   ├── modal_train.py       # Modal GPU training function
+│   │   ├── run_modal.py         # subprocess wrapper called by api.py
+│   │   ├── predict.py           # standalone prediction helpers
+│   │   └── utils.py             # load/save model, scaler, dataframe
+│   ├── .env                     # HF + Modal credentials (not committed)
+│   ├── api.py                   # FastAPI app
+│   └── requirements.txt
 ├── data/
-│   ├── raw/                    # Original datasets
-│   │   ├── train.csv
-│   │   └── test.csv
-│   └── processed/              # Processed datasets
-├── dataset/                    # Original dataset folder
-│   ├── train.csv
-│   └── test.csv
-├── models/                     # Trained models
-│   ├── catboost_best_model.cbm
-│   ├── scaler.joblib
-│   └── feature_names.csv
-├── reports/                    # Evaluation reports
-│   └── figures/                # Visualizations
-├── config.py                   # Configuration settings
-├── main.py                     # Main pipeline script
-├── heart_disease_prediction.ipynb  # Research notebook
+│   ├── raw/                     # train.csv goes here
+│   └── processed/               # output of preprocessing.py
+├── models/                      # downloaded from HF Hub on startup
+├── .streamlit/
+│   └── secrets.toml             # API_URL for Streamlit
+├── config.py                    # all paths and constants
+├── streamlit_app.py
 └── README.md
 ```
 
-## Features
+## Setup
 
-- **Model Training**: Train CatBoost model from scratch with Optuna optimization
-- **Single Patient Prediction**: Predict heart disease for individual patients
-- **Batch Prediction**: Process multiple patients from CSV files
-- **Risk Level Classification**: Categorize patients into High (Presence) or Low (Absence) risk
-- **Medical Recommendations**: Provide actionable recommendations based on risk level
-- **Web UI**: Streamlit interface for easy interaction
-- **REST API**: FastAPI backend for integration
-
-## Installation
+### 1. Clone and create a virtual environment
 
 ```bash
-# Install required packages
-pip install pandas numpy catboost scikit-learn joblib
-```
+git clone https://github.com/your-username/heart-disease-prediction.git
+cd heart-disease-prediction
 
-## Usage
+python -m venv venv
 
-### Option 1: Web Interface (Recommended)
-
-#### Start the Complete Application
-
-```bash
 # Windows
-run_app.bat
+venv\Scripts\activate
 
-# Linux/Mac
-./run_app.sh
+# Linux / Mac
+source venv/bin/activate
+
+pip install -r backend/requirements.txt
 ```
 
-This will start:
-1. FastAPI backend at http://localhost:8000
-2. Streamlit UI at http://localhost:8501
+### 2. Configure credentials
 
-The Streamlit UI provides three tabs:
-- **Train Model**: Upload training data and train the model
-- **Single Patient Prediction**: Enter patient details for prediction
-- **Batch Prediction**: Upload CSV for multiple predictions
+Create `backend/.env`:
 
-### Option 2: Command Line Interface
-
-#### Train Model
-
-```bash
-python main.py --train
+```
+HF_TOKEN=hf_your_token_here
+HF_REPO_ID=YourUsername/heart-disease-model
+MODAL_TOKEN_ID=ak-your_modal_token_id
+MODAL_TOKEN_SECRET=as-your_modal_token_secret
 ```
 
-This will:
-1. Preprocess the training data (handle outliers, create features)
-2. Train CatBoost model with best parameters from research (GPU if available)
-3. Save model and scaler to `models/` directory
+Create `.streamlit/secrets.toml`:
 
-#### Interactive Prediction (Single Patient)
-
-```bash
-python main.py --predict
+```toml
+API_URL = "http://localhost:8000"
 ```
 
-#### Batch Prediction (Multiple Patients)
+### 3. Set up Hugging Face Hub
+
+1. Create an account at [huggingface.co](https://huggingface.co)
+2. Go to **Settings → Access Tokens** and create a token with write access
+3. Create a new model repository (e.g. `YourUsername/heart-disease-model`)
+4. Paste the token and repo ID into `backend/.env`
+
+The API uploads a new versioned tag (`v1.0`, `v2.0`, ...) after each training run
+and downloads the latest version automatically on startup.
+
+### 4. Set up Modal (GPU training)
 
 ```bash
-# Basic usage (saves to predictions.csv)
-python main.py --batch input_patients.csv
+pip install modal
 
-# Specify output file
-python main.py --batch input_patients.csv output_predictions.csv
+# Authenticate — opens browser
+python -m modal setup
+
+# Create the secret that the GPU container uses to upload to HF Hub
+python -m modal secret create heart-disease-secrets \
+    HF_TOKEN=hf_your_token \
+    HF_REPO_ID=YourUsername/heart-disease-model
+
+# Deploy the training function so Render can call it remotely
+python -m modal deploy backend/training/modal_train.py
 ```
 
-### Option 3: FastAPI Backend
+Add your Modal tokens to `backend/.env` (found in `~/.modal.toml` after setup):
 
-#### Start the API Server
-
-```bash
-# From project root
-uvicorn backend.api:app --reload --port 8000
-
-# API will be available at http://localhost:8000
-# Interactive docs at http://localhost:8000/docs
+```
+MODAL_TOKEN_ID=ak-...
+MODAL_TOKEN_SECRET=as-...
 ```
 
-#### Train Model (API)
+To test the Modal function locally before deploying:
 
 ```bash
-curl -X POST "http://localhost:8000/train" \
-  -F "file=@data/raw/train.csv"
-
-# Check training status
-curl "http://localhost:8000/train/status"
+# Requires data/processed/ CSVs to exist (run preprocessing first)
+python -m modal run backend/training/modal_train.py
 ```
 
-#### Single Patient Prediction (API)
+## Running Locally
 
 ```bash
-curl -X POST "http://localhost:8000/predict" \
+# Terminal 1 — FastAPI backend
+cd backend
+uvicorn api:app --reload --port 8000
+
+# Terminal 2 — Streamlit UI
+streamlit run streamlit_app.py
+```
+
+- API docs: http://localhost:8000/docs
+- UI: http://localhost:8501
+
+## Training a Model
+
+### Via the UI
+
+1. Open the **Train Model** tab
+2. Upload `train.csv`
+3. Click **Start Training** — poll status until complete
+4. New version tag appears in the sidebar dropdown
+
+### Via the API
+
+```bash
+# Start training
+curl -X POST http://localhost:8000/train -F "file=@data/raw/train.csv"
+
+# Poll status
+curl http://localhost:8000/train/status
+```
+
+Training priority: **Modal T4 GPU → local GPU → local CPU**
+
+## Prediction
+
+### Single patient (API)
+
+```bash
+curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
   -d '{
-    "Age": 58,
-    "Sex": 1,
-    "BP": 152,
-    "Cholesterol": 239,
-    "FBS_over_120": 0,
-    "Max_HR": 158,
-    "Exercise_angina": 1,
-    "ST_depression": 3.6,
-    "Number_of_vessels_fluro": 2
+    "Age": 58, "Sex": 1, "BP": 152, "Cholesterol": 239,
+    "FBS_over_120": 0, "Max_HR": 158, "Exercise_angina": 1,
+    "ST_depression": 3.6, "Number_of_vessels_fluro": 2
   }'
 ```
 
-#### Batch Prediction (API)
+### Batch prediction (API)
 
 ```bash
-curl -X POST "http://localhost:8000/predict/batch" \
-  -F "file=@sample_patients.csv"
+curl -X POST http://localhost:8000/predict/batch -F "file=@patients.csv"
 ```
 
-#### Python Client
+## Input Features
 
-```python
-import requests
+| Feature | Type | Description |
+|---|---|---|
+| Age | int | Patient age |
+| Sex | 0/1 | 0 = Female, 1 = Male |
+| BP | int | Blood pressure (mm Hg) |
+| Cholesterol | int | Serum cholesterol (mg/dl) |
+| Max HR | int | Max heart rate achieved |
+| ST depression | float | ST depression from exercise |
+| Exercise angina | 0/1 | Exercise induced angina |
+| FBS over 120 | 0/1 | Fasting blood sugar > 120 |
+| Chest pain type | 1–4 | Type of chest pain |
+| EKG results | 0–2 | Resting ECG results |
+| Slope of ST | 1–3 | Slope of peak exercise ST |
+| Number of vessels fluro | 0–3 | Major vessels from fluoroscopy |
+| Thallium | 3/6/7 | Thallium stress test result |
 
-# Train model
-url = "http://localhost:8000/train"
-files = {"file": open("data/raw/train.csv", "rb")}
-response = requests.post(url, files=files)
-print(response.json())
+Engineered features (Age/Cholesterol/BP bins, interaction terms) are added
+automatically during preprocessing — you don't need to provide them.
 
-# Check training status
-status_url = "http://localhost:8000/train/status"
-status = requests.get(status_url).json()
-print(f"Status: {status['status']}")
-print(f"Message: {status['message']}")
+## Model
 
-# Single prediction
-url = "http://localhost:8000/predict"
-data = {
-    "Age": 58,
-    "Sex": 1,
-    "BP": 152,
-    "Cholesterol": 239,
-    "FBS_over_120": 0,
-    "Max_HR": 158,
-    "Exercise_angina": 1,
-    "ST_depression": 3.6,
-    "Number_of_vessels_fluro": 2
-}
+- **Algorithm**: CatBoost with Optuna-tuned hyperparameters
+- **Metric**: ROC-AUC (best: 0.9562 on test set)
+- **GPU**: T4 via Modal when deployed, local CUDA when available
 
-response = requests.post(url, json=data)
-result = response.json()
-print(f"Prediction: {result['heart_disease_prediction']}")
-print(f"Probability: {result['heart_disease_probability']:.2%}")
-print(f"Risk Level: {result['risk_level']}")
+## Deployment (Render)
 
-# Batch prediction
-url = "http://localhost:8000/predict/batch"
-files = {"file": open("sample_patients.csv", "rb")}
-response = requests.post(url, files=files)
-print(response.json())
+Add these environment variables in the Render dashboard:
+
+```
+HF_TOKEN
+HF_REPO_ID
+MODAL_TOKEN_ID
+MODAL_TOKEN_SECRET
 ```
 
-### Option 4: Python Module
-
-```python
-from backend.training.predict import predict_single, predict_batch
-
-# Single patient prediction
-patient_data = {
-    'Age': 58,
-    'Sex': 1,  # 1=Male, 0=Female
-    'BP': 152,
-    'Cholesterol': 239,
-    'Max HR': 158,
-    'Exercise angina': 1,
-    'ST depression': 3.6,
-    'Number of vessels fluro': 2,
-    # ... other features
-}
-
-result = predict_single(patient_data)
-print(result)
-
-# Batch prediction
-results_df = predict_batch('patients.csv', 'predictions.csv')
-```
-
-## Input Data Format
-
-### Required Features
-
-The model expects the following features:
-
-**Numerical Features:**
-- `Age`: Patient age (years)
-- `BP`: Blood pressure (mm Hg)
-- `Cholesterol`: Serum cholesterol (mg/dl)
-- `Max HR`: Maximum heart rate achieved
-- `ST depression`: ST depression induced by exercise
-
-**Categorical Features:**
-- `Sex`: 1 = Male, 0 = Female
-- `Chest pain type`: 1-4 (type of chest pain)
-- `FBS over 120`: Fasting blood sugar > 120 mg/dl (1 = true, 0 = false)
-- `EKG results`: Resting electrocardiographic results (0-2)
-- `Exercise angina`: Exercise induced angina (1 = yes, 0 = no)
-- `Slope of ST`: Slope of peak exercise ST segment (1-3)
-- `Number of vessels fluro`: Number of major vessels colored by fluoroscopy (0-3)
-- `Thallium`: Thallium stress test result (3, 6, 7)
-
-**Engineered Features** (automatically created):
-- Age groups (Young, Middle, Senior)
-- Cholesterol levels (Normal, Borderline, High)
-- BP levels (Normal, Elevated, High)
-- Interaction features
-
-### CSV Format Example
-
-```csv
-id,Age,Sex,Chest pain type,BP,Cholesterol,FBS over 120,EKG results,Max HR,Exercise angina,ST depression,Slope of ST,Number of vessels fluro,Thallium
-1,58,1,4,152,239,0,0,158,1,3.6,2,2,7
-2,52,1,1,125,325,0,2,171,0,0.0,1,0,3
-```
-
-## Risk Levels
-
-- **High** (Presence): Heart disease detected - Immediate consultation with cardiologist recommended
-- **Low** (Absence): No heart disease detected - Continue regular health monitoring
-
-## Model Information
-
-- **Algorithm**: CatBoost Classifier
-- **Training Data**: 630,000 patient records
-- **Features**: 13 base features + engineered features
-- **Performance**: Best parameters from Optuna optimization (ROC-AUC: 0.9562)
-- **GPU Support**: Automatically uses GPU if available, falls back to CPU
-
-## Configuration
-
-Edit `config.py` to customize:
-- File paths
-- Risk thresholds
-- Feature engineering parameters
-- Model settings
+Start command: `uvicorn backend.api:app --host 0.0.0.0 --port $PORT`
 
 ## Notes
 
-- The model file (`catboost_best_model.cbm`) must be present in the `models/` directory
-- For production use, ensure proper medical validation and regulatory compliance
-- This tool is for educational/research purposes and should not replace professional medical diagnosis
-
-## License
-
-See LICENSE file for details.
+- Model artifacts are version-tagged on HF Hub — you can roll back to any previous version from the sidebar
+- This is a research/educational project and should not be used for clinical decisions without proper medical validation
