@@ -1,8 +1,6 @@
 # Heart Disease Prediction
 
-CatBoost classifier for predicting heart disease presence from patient medical data.
-FastAPI backend + Streamlit UI. Training runs on Modal GPU (T4) when deployed,
-falls back to local GPU/CPU for development.
+CatBoost classifier for heart disease prediction trained on 630K records using Optuna 50-trial hyperparameter tuning (ROC-AUC: 0.9562). Training runs on Modal T4 GPU when deployed, falls back to local CPU for development. FastAPI backend and Streamlit UI for single and batch predictions, with Hugging Face Hub for versioned model storage.
 
 ## Architecture
 
@@ -180,7 +178,6 @@ uvicorn api:app --reload --port 8000
 streamlit run streamlit_app.py
 ```
 
-- API docs: http://localhost:8000/docs
 - UI: http://localhost:8501
 
 ## Training a Model
