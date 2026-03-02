@@ -19,7 +19,7 @@ graph LR
         Tuned -->|Modal T4 GPU| GPU["☁️ Modal GPU<br>train_on_gpu()"]
         Tuned -->|fallback| LGPU["💻 Local GPU"]
         LGPU -->|fallback| CPU["🖳 Local CPU"]
-        GPU & LGPU & CPU --> Artifacts["Model Artifacts<br>(.cbm + scaler.joblib)"]
+        GPU & LGPU & CPU --> Artifacts["Model Artifacts<br>(.cbm + preprocessor.joblib + scaler.joblib)"]
     end
 
     %% Serving
@@ -82,7 +82,7 @@ heart-disease-prediction/
 ├── data/
 │   ├── raw/                     # train.csv goes here
 │   └── processed/               # output of preprocessing.py
-├── models/                      # downloaded from HF Hub on startup
+├── models/                      # catboost .cbm, preprocessor.joblib, scaler.joblib
 ├── .streamlit/
 │   └── secrets.toml             # API_URL for Streamlit
 ├── config.py                    # all paths and constants
@@ -240,7 +240,7 @@ curl -X POST http://localhost:8000/predict/batch -F "file=@patients.csv"
 | Thallium | 3/6/7 | Thallium stress test result |
 
 Engineered features (Age/Cholesterol/BP bins, interaction terms) are added
-automatically during preprocessing — you don't need to provide them.
+automatically during preprocessing by `preprocessor.joblib` — you don't need to provide them.
 
 ## Model
 
