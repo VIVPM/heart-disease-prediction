@@ -16,8 +16,10 @@ Steps:
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
 import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from config import (
@@ -26,8 +28,92 @@ from config import (
     AGE_BINS, AGE_LABELS, CHOLESTEROL_BINS, CHOLESTEROL_LABELS,
     BP_BINS, BP_LABELS, TEST_SIZE, RANDOM_STATE
 )
-from backend.training.utils import create_directories, save_dataframe
+from backend.training.utils import create_directories, save_dataframe, save_joblib
 from backend.training.data_loader import load_data
+
+
+class HeartDiseasePreprocessor:
+    def __init__(self):
+        self.outlier_bounds = {}
+        self.encoder = OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore')
+        self.categorical_columns = [
+            'Chest pain type', 'EKG results', 'Slope of ST', 'Thallium',
+            'Age_Group', 'Cholesterol_Level', 'BP_Level'
+        ]
+        self.feature_names_out_ = None
+        self.is_fitted = False
+
+    def fit(self, X: pd.DataFrame):
+        for col in list(OUTLIER_COLUMNS):
+            if col in X.columns:
+                lower = X[col].quantile(OUTLIER_LOWER_QUANTILE)
+                upper = X[col].quantile(OUTLIER_UPPER_QUANTILE)
+                self.outlier_bounds[col] = (lower, upper)
+                
+        X_temp = X.copy()
+        X_temp = self._add_clinical_bins(X_temp)
+        cols_to_encode = [c for c in self.categorical_columns if c in X_temp.columns]
+        
+        if cols_to_encode:
+            self.encoder.fit(X_temp[cols_to_encode])
+            
+        self.is_fitted = True
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if not self.is_fitted:
+            raise RuntimeError("Preprocessor must be fitted before transform.")
+            
+        X_out = X.copy()
+        
+        for col, (lower, upper) in self.outlier_bounds.items():
+            if col in X_out.columns:
+                X_out[col] = np.clip(X_out[col], lower, upper)
+                
+        if 'Age' in X_out.columns and 'Max HR' in X_out.columns:
+            X_out['Age_HR_Interaction'] = X_out['Age'] * X_out['Max HR']
+        if 'BP' in X_out.columns and 'Cholesterol' in X_out.columns:
+            X_out['BP_Cholesterol_Risk'] = X_out['BP'] * X_out['Cholesterol']
+            
+        X_out = self._add_clinical_bins(X_out)
+        
+        cols_to_encode = [c for c in self.categorical_columns if c in X_out.columns]
+        if cols_to_encode:
+            encoded_arr = self.encoder.transform(X_out[cols_to_encode])
+            encoded_cols = self.encoder.get_feature_names_out(cols_to_encode)
+            df_encoded = pd.DataFrame(encoded_arr, columns=encoded_cols, index=X_out.index)
+            X_out = pd.concat([X_out.drop(columns=cols_to_encode), df_encoded], axis=1)
+
+        if self.feature_names_out_ is not None:
+            # Need to capture expected columns that aren't present and fill with 0
+            for col in self.feature_names_out_:
+                if col not in X_out.columns:
+                    X_out[col] = 0
+            # then limit to just those columns to respect alignment
+            X_out = X_out[self.feature_names_out_]
+            
+        return X_out
+
+    def fit_transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        self.fit(X)
+        X_out = self.transform(X)
+        self.feature_names_out_ = list(X_out.columns)
+        return X_out
+        
+    def _add_clinical_bins(self, df: pd.DataFrame) -> pd.DataFrame:
+        if 'Age' in df.columns:
+            df['Age_Group'] = pd.cut(df['Age'], bins=list(AGE_BINS), labels=list(AGE_LABELS)).astype(object)
+            df['Age_Group'] = df['Age_Group'].fillna('Unknown')
+            
+        if 'Cholesterol' in df.columns:
+            df['Cholesterol_Level'] = pd.cut(df['Cholesterol'], bins=list(CHOLESTEROL_BINS), labels=list(CHOLESTEROL_LABELS)).astype(object)
+            df['Cholesterol_Level'] = df['Cholesterol_Level'].fillna('Unknown')
+            
+        if 'BP' in df.columns:
+            df['BP_Level'] = pd.cut(df['BP'], bins=list(BP_BINS), labels=list(BP_LABELS)).astype(object)
+            df['BP_Level'] = df['BP_Level'].fillna('Unknown')
+            
+        return df
 
 
 def drop_id_column(df):
@@ -77,80 +163,7 @@ def encode_target(df):
     return df
 
 
-def handle_outliers(X_train, X_test):
-    """
-    Clip extreme values using quantile bounds learned from the training set.
-    Limits fit on train only — same bounds applied to test to avoid leakage.
-    """
-    print("\nHandling outliers...")
-
-    for col in OUTLIER_COLUMNS:
-        if col in X_train.columns:
-            lower_limit = X_train[col].quantile(OUTLIER_LOWER_QUANTILE)
-            upper_limit = X_train[col].quantile(OUTLIER_UPPER_QUANTILE)
-
-            X_train[col] = np.clip(X_train[col], lower_limit, upper_limit)
-            X_test[col]  = np.clip(X_test[col],  lower_limit, upper_limit)
-
-            print(f"  {col}: capped to [{lower_limit:.1f}, {upper_limit:.1f}]")
-
-    return X_train, X_test
-
-
-def create_interaction_features(X_train, X_test):
-    """
-    Two interaction terms that showed up as useful in the notebook:
-      - Age * Max HR  (younger people hit higher heart rates)
-      - BP * Cholesterol  (combined cardiovascular risk proxy)
-    """
-    print("\nCreating interaction features...")
-
-    X_train['Age_HR_Interaction']   = X_train['Age'] * X_train['Max HR']
-    X_test['Age_HR_Interaction']    = X_test['Age']  * X_test['Max HR']
-
-    X_train['BP_Cholesterol_Risk']  = X_train['BP'] * X_train['Cholesterol']
-    X_test['BP_Cholesterol_Risk']   = X_test['BP']  * X_test['Cholesterol']
-
-    print("  Created: Age_HR_Interaction, BP_Cholesterol_Risk")
-
-    return X_train, X_test
-
-
-def add_clinical_bins(df):
-    """
-    Bin continuous features into clinically meaningful categories.
-    Cuts match standard medical guidelines (e.g. BP < 120 = Normal).
-    """
-    df = df.copy()
-    df['Age_Group']         = pd.cut(df['Age'],         bins=AGE_BINS,         labels=AGE_LABELS)
-    df['Cholesterol_Level'] = pd.cut(df['Cholesterol'], bins=CHOLESTEROL_BINS, labels=CHOLESTEROL_LABELS)
-    df['BP_Level']          = pd.cut(df['BP'],          bins=BP_BINS,          labels=BP_LABELS)
-    return df
-
-
-def encode_categorical_features(X_train, X_test):
-    """
-    One-hot encode categoricals, then align test columns to train.
-    align() fills any missing test columns with 0 rather than crashing.
-    """
-    print("\nEncoding categorical features...")
-
-    categorical_columns = [
-        'Chest pain type', 'EKG results', 'Slope of ST', 'Thallium',
-        'Age_Group', 'Cholesterol_Level', 'BP_Level'
-    ]
-    categorical_columns = [col for col in categorical_columns if col in X_train.columns]
-    print(f"  Encoding: {categorical_columns}")
-
-    X_train = pd.get_dummies(X_train, columns=categorical_columns, drop_first=True)
-    X_test  = pd.get_dummies(X_test,  columns=categorical_columns, drop_first=True)
-
-    # Make sure test has exactly the same columns as train, in the same order
-    X_train, X_test = X_train.align(X_test, join='left', axis=1, fill_value=0)
-
-    print(f"  Features after encoding: {X_train.shape[1]}")
-
-    return X_train, X_test
+    pass
 
 
 def preprocess_data():
@@ -192,15 +205,13 @@ def preprocess_data():
     print("FEATURE ENGINEERING")
     print("=" * 60)
 
-    X_train, X_test = handle_outliers(X_train, X_test)
-    X_train, X_test = create_interaction_features(X_train, X_test)
-
-    print("\nAdding clinical bins...")
-    X_train = add_clinical_bins(X_train)
-    X_test  = add_clinical_bins(X_test)
-    print("  Created: Age_Group, Cholesterol_Level, BP_Level")
-
-    X_train, X_test = encode_categorical_features(X_train, X_test)
+    preprocessor = HeartDiseasePreprocessor()
+    X_train = preprocessor.fit_transform(X_train)
+    X_test = preprocessor.transform(X_test)
+    
+    preprocessor_path = DATA_PROCESSED.parent.parent / "models" / "preprocessor.joblib"
+    save_joblib(preprocessor, preprocessor_path)
+    print(f"  Saved fitted preprocessor to {preprocessor_path}")
 
     print("\n" + "=" * 60)
     print("SAVING PROCESSED DATA")

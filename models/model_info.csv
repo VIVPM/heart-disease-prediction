@@ -1,2 +1,2 @@
 model,best_score,device,best_params
-CatBoost,0.9561511840928975,GPU,"{'iterations': 1623, 'learning_rate': 0.15852199413036414, 'depth': 4, 'l2_leaf_reg': 9.505994796613438, 'border_count': 78, 'bagging_temperature': 0.2525892468461163, 'random_strength': 4.2185692682184746, 'scale_pos_weight': 1.9630860214614314, 'random_state': 42, 'eval_metric': 'AUC', 'early_stopping_rounds': 50, 'verbose': False}"
+CatBoost,0.9561847477090333,GPU,"{'iterations': 1623, 'learning_rate': 0.15852199413036414, 'depth': 4, 'l2_leaf_reg': 9.505994796613438, 'border_count': 78, 'bagging_temperature': 0.2525892468461163, 'random_strength': 4.2185692682184746, 'scale_pos_weight': 1.9630860214614314, 'random_state': 42, 'eval_metric': 'AUC', 'early_stopping_rounds': 50, 'verbose': False}"

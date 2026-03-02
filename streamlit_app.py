@@ -30,6 +30,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+if "is_training" not in st.session_state:
+    st.session_state["is_training"] = False
+if "is_predicting" not in st.session_state:
+    st.session_state["is_predicting"] = False
+if "is_batching" not in st.session_state:
+    st.session_state["is_batching"] = False
+
 # ---------------------------------------------------------------------------
 # CSS
 # ---------------------------------------------------------------------------
@@ -236,16 +243,20 @@ with tab_train:
                 "🚀 Start Training",
                 use_container_width=True,
                 type="primary",
-                disabled=(uploaded_csv is None),
+                disabled=(uploaded_csv is None) or st.session_state["is_predicting"] or st.session_state["is_batching"],
             )
 
         if train_btn and uploaded_csv is not None:
+            st.session_state["is_training"] = True
             with st.spinner("Uploading data and starting training..."):
-                resp = requests.post(
-                    f"{API_URL}/train",
-                    files={"file": (uploaded_csv.name, uploaded_csv.getvalue(), "text/csv")},
-                    timeout=30,
-                )
+                try:
+                    resp = requests.post(
+                        f"{API_URL}/train",
+                        files={"file": (uploaded_csv.name, uploaded_csv.getvalue(), "text/csv")},
+                        timeout=30,
+                    )
+                finally:
+                    st.session_state["is_training"] = False
             if resp.status_code == 200:
                 st.success("✅ Training started! Monitor progress below.")
                 st.session_state["training_triggered"] = True
@@ -430,7 +441,7 @@ with tab1:
                                format_func=lambda x: x[1])
 
     st.markdown("---")
-    predict_btn = st.button("🔮 Predict Heart Disease Risk", use_container_width=True, type="primary")
+    predict_btn = st.button("🔮 Predict Heart Disease Risk", use_container_width=True, type="primary", disabled=st.session_state["is_training"] or st.session_state["is_batching"])
 
     if predict_btn:
         payload = {
@@ -449,9 +460,13 @@ with tab1:
             "Thallium": thallium[0],
         }
 
+        st.session_state["is_predicting"] = True
         with st.spinner("Analyzing patient data..."):
-            sel_ver = st.session_state.get("selected_version", "main")
-            resp = requests.post(f"{API_URL}/predict", json=payload, params={"version": sel_ver})
+            try:
+                sel_ver = st.session_state.get("selected_version", "main")
+                resp = requests.post(f"{API_URL}/predict", json=payload, params={"version": sel_ver})
+            finally:
+                st.session_state["is_predicting"] = False
 
         if resp.status_code == 200:
             result = resp.json()
@@ -544,16 +559,20 @@ with tab2:
         st.markdown(f"**📊 Loaded {len(df_preview)} patients**")
         st.dataframe(df_preview.head(10), use_container_width=True)
 
-        if st.button("🔮 Predict All Patients", use_container_width=True, type="primary"):
+        if st.button("🔮 Predict All Patients", use_container_width=True, type="primary", disabled=st.session_state["is_training"] or st.session_state["is_predicting"]):
             uploaded_file.seek(0)
 
+            st.session_state["is_batching"] = True
             with st.spinner(f"Analyzing {len(df_preview)} patients..."):
-                sel_ver = st.session_state.get("selected_version", "main")
-                resp = requests.post(
-                    f"{API_URL}/predict/batch",
-                    files={"file": (uploaded_file.name, uploaded_file.getvalue(), "text/csv")},
-                    params={"version": sel_ver},
-                )
+                try:
+                    sel_ver = st.session_state.get("selected_version", "main")
+                    resp = requests.post(
+                        f"{API_URL}/predict/batch",
+                        files={"file": (uploaded_file.name, uploaded_file.getvalue(), "text/csv")},
+                        params={"version": sel_ver},
+                    )
+                finally:
+                    st.session_state["is_batching"] = False
 
             if resp.status_code == 200:
                 data = resp.json()

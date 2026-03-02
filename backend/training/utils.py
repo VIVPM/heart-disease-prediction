@@ -68,6 +68,19 @@ def load_scaler(filepath: Path):
     return joblib.load(filepath)
 
 
+def save_joblib(obj, filepath: Path):
+    """Save an arbitrary object using joblib."""
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(obj, filepath)
+
+
+def load_joblib(filepath: Path):
+    """Load an arbitrary object using joblib."""
+    if not filepath.exists():
+        raise FileNotFoundError(f"Object not found: {filepath}")
+    return joblib.load(filepath)
+
+
 def create_directories():
     """Make sure all data/model/report dirs exist before anything else tries to write to them."""
     from config import DATA_RAW, DATA_PROCESSED, MODELS_DIR, REPORTS_DIR, FIGURES_DIR
