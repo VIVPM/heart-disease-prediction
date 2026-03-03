@@ -113,8 +113,10 @@ st.markdown("""
 def check_api():
     try:
         r = requests.get(f"{API_URL}/", timeout=5)
-        return r.status_code == 200, r.json()
-    except (requests.ConnectionError, requests.Timeout):
+        if r.status_code == 200:
+            return True, r.json()
+        return False, {}
+    except Exception:
         return False, {}
 
 
