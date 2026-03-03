@@ -207,12 +207,6 @@ def preprocess_data():
 
     preprocessor = HeartDiseasePreprocessor()
     X_train = preprocessor.fit_transform(X_train)
-    X_test = preprocessor.transform(X_test)
-    
-    preprocessor_path = DATA_PROCESSED.parent.parent / "models" / "preprocessor.joblib"
-    save_joblib(preprocessor, preprocessor_path)
-    print(f"  Saved fitted preprocessor to {preprocessor_path}")
-
     print("\n" + "=" * 60)
     print("SAVING PROCESSED DATA")
     print("=" * 60)

@@ -52,7 +52,6 @@ HF_REPO_ID = os.environ.get("HF_REPO_ID", "")
 # Files to sync with HF Hub
 HF_FILES = [
     "catboost_best_model.cbm",
-    "preprocessor.joblib",
     "scaler.joblib",
     "model_info.csv",
 ]
@@ -65,7 +64,6 @@ from backend.training.utils import load_model, load_scaler, load_joblib
 # ---------------------------------------------------------------------------
 model = None
 scaler = None
-preprocessor = None
 feature_names = []
 current_version = None
 
@@ -224,7 +222,6 @@ def _load_model_artifacts(version: str = "main", download: bool = True):
 
     model_path  = MODELS_DIR / MODEL_FILE
     scaler_path = MODELS_DIR / SCALER_FILE
-    preprocessor_path = MODELS_DIR / "preprocessor.joblib"
 
     if not model_path.exists():
         raise FileNotFoundError(
@@ -233,19 +230,6 @@ def _load_model_artifacts(version: str = "main", download: bool = True):
 
     model = load_model(model_path)
 
-    if preprocessor_path.exists():
-        try:
-            # Need to import HeartDiseasePreprocessor so pickle can find it
-            from backend.training.preprocessing import HeartDiseasePreprocessor
-            preprocessor = load_joblib(preprocessor_path)
-            print("✅ Loaded preprocessor: preprocessor.joblib")
-        except Exception as e:
-            preprocessor = None
-            print(f"⚠️ Failed to load preprocessor: {e}")
-    else:
-        preprocessor = None
-        print("⚠️ No preprocessor found. Warning: Raw features may cause errors.")
-
     if scaler_path.exists():
         scaler = load_scaler(scaler_path)
         print(f"✅ Loaded scaler: {SCALER_FILE}")
@@ -253,10 +237,7 @@ def _load_model_artifacts(version: str = "main", download: bool = True):
         scaler = None
         print("⚠️  No scaler found. Predictions will use unscaled features.")
 
-    # Use preprocessor's feature names if available, else fallback to scaler
-    if preprocessor is not None and preprocessor.feature_names_out_ is not None:
-        feature_names = preprocessor.feature_names_out_
-    elif scaler is not None and hasattr(scaler, "feature_names_in_"):
+    if scaler is not None and hasattr(scaler, "feature_names_in_"):
         feature_names = list(scaler.feature_names_in_)
     else:
         feature_names = list(model.feature_names_) if model.feature_names_ is not None else []
@@ -397,16 +378,13 @@ def _encode_patient(data: PatientInput) -> pd.DataFrame:
 
     df = pd.DataFrame([row])
     
-    # 2. Fully apply the fitted preprocessor pipeline to get bounds, interactions, and encodings
-    if preprocessor is not None:
-        df = preprocessor.transform(df)
-    else:
-        # Fallback if no preprocessor is generated (for older models)
-        # Attempt minimal fallback with zeroed out columns
-        for fn in feature_names:
-            if fn not in df.columns:
-                df[fn] = 0
-        df = df[feature_names]
+    # Simple fallback since preprocessor is removed for memory constraints
+    # Keep it aligned with raw feature inputs
+    for fn in feature_names:
+        if fn not in df.columns:
+            df[fn] = 0
+            
+    df = df[feature_names]
 
     return df
 
