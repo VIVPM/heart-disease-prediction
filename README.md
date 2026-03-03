@@ -9,17 +9,16 @@ graph LR
     %% Data Pipeline
     subgraph Data_Pipeline [1. Data Pipeline]
         Raw[Raw CSV Data] -->|data_loader.py| Loaded[Loaded DataFrame]
-        Loaded -->|preprocessing.py| Feats["Engineered Features<br>(Outlier Caps, Bins, Interactions)"]
-        Feats -->|StandardScaler| Scaled[Scaled Train / Test]
+        Loaded -->|preprocessing.py| Cleaned[Cleaned Train / Test]
     end
 
     %% Training Pipeline
     subgraph Training_Pipeline [2. Model Training]
-        Scaled -->|Optuna 50 trials| Tuned["Best CatBoost Params<br>(Trial 41, AUC: 0.9562)"]
+        Cleaned -->|Optuna 50 trials| Tuned["Best CatBoost Params<br>(Trial 41, AUC: 0.9562)"]
         Tuned -->|Modal T4 GPU| GPU["☁️ Modal GPU<br>train_on_gpu()"]
         Tuned -->|fallback| LGPU["💻 Local GPU"]
         LGPU -->|fallback| CPU["🖳 Local CPU"]
-        GPU & LGPU & CPU --> Artifacts["Model Artifacts<br>(.cbm + scaler.joblib)"]
+        GPU & LGPU & CPU --> Artifacts["Model Artifacts<br>(.cbm)"]
     end
 
     %% Serving
@@ -82,7 +81,7 @@ heart-disease-prediction/
 ├── data/
 │   ├── raw/                     # train.csv goes here
 │   └── processed/               # output of preprocessing.py
-├── models/                      # catboost .cbm, scaler.joblib
+├── models/                      # catboost .cbm
 ├── .streamlit/
 │   └── secrets.toml             # API_URL for Streamlit
 ├── config.py                    # all paths and constants
@@ -238,8 +237,6 @@ curl -X POST http://localhost:8000/predict/batch -F "file=@patients.csv"
 | Slope of ST | 1–3 | Slope of peak exercise ST |
 | Number of vessels fluro | 0–3 | Major vessels from fluoroscopy |
 | Thallium | 3/6/7 | Thallium stress test result |
-
-Engineered features (Age/Cholesterol/BP bins, interaction terms) are calculated locally in the training script. During inference, if these categorical bounds aren't directly provided in the payload, the model uses its default branch values for unmatched keys representing them as 0s.
 
 ## Model
 

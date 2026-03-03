@@ -526,8 +526,8 @@ def _run_training_pipeline(data_path: Path):
                 training_status["message"] = "Step 3/3: Uploading model to HuggingFace Hub..."
             _upload_to_hf(best_score=best_score)
 
-        # Reload model into memory from local files
-        _load_model_artifacts(download=False)
+        # Reload model into memory (fetch from HF Hub if Modal trained it)
+        _load_model_artifacts(download=modal_available)
 
         with training_lock:
             training_status["status"]       = "completed"

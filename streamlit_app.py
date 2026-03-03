@@ -559,7 +559,7 @@ with tab2:
     if uploaded_file is not None:
         df_preview = pd.read_csv(uploaded_file)
         st.markdown(f"**📊 Loaded {len(df_preview)} patients**")
-        st.dataframe(df_preview.head(10), use_container_width=True)
+        st.dataframe(df_preview.head(), use_container_width=True)
 
         if st.button("🔮 Predict All Patients", use_container_width=True, type="primary", disabled=st.session_state["is_training"] or st.session_state["is_predicting"]):
             uploaded_file.seek(0)
