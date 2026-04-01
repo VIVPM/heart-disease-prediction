@@ -70,3 +70,4 @@ Thumbs.db
 *.log
 
 catboost_info/
+.venv
